@@ -1,0 +1,64 @@
+// *** Final Project Pt. 1: Data Aggregation ***
+
+// Load listings data
+val listings = spark.read
+    .option("inferSchema", "true")
+    .option("header", "true")
+    .option("multiLine", true)
+    .csv("file_path/airbnb_data/listings/*.csv")
+val listingsDF = listings.toDF
+//listingsDF.count
+
+// Inspect listings, make sure data loaded properly
+val cleanedListings = listingsDF.filter($"region" isin ("Beijing", "Buenos Aires", "Hong Kong", "Los Angeles", "Mexico City", "Portland", "Rio de Janeiro", "Salem", "San Diego", "San Francisco", "Santiago", "Seattle", "Singapore", "Tokyo"))
+cleanedListings.count
+
+// Map in new listings columns
+def commaCount = udf((s: String) => if (s != null) s.count(ch => ch.equals(',')) else 0)
+
+val extendedListings = cleanedListings
+      .withColumn("numVerifications", commaCount($"host_verifications") + 1)
+      .withColumn("isGovVerified", $"host_verifications".contains("government_id")) // This captures both 'government_id' and 'offline_government_id'
+
+// What are the min and max # of host verifications?
+import org.apache.spark.sql.functions._
+
+extendedListings.agg(min($"numVerifications"), max($"numVerifications")).show()
+// Min: 1
+// Max: 13
+
+// Load review data, check on count
+val reviews = spark.read
+    .option("inferSchema", "true")
+    .option("header", "true")
+    .option("multiLine", true)
+    .csv("file_path/airbnb_data/reviews/*.csv")
+val reviewsDF = reviews.toDF
+reviewsDF.count
+
+// Map in new review columns
+import org.apache.spark.sql.types._
+
+val extendedReviews = reviewsDF
+      .withColumn("review_length", length($"comments"))
+      .withColumn("isAutomatedCancellation", $"comments".contains("This is an automated posting."))
+      .withColumn("isHostCancellation", $"isAutomatedCancellation" === true && $"comments".contains("The host canceled this reservation"))
+      .withColumn("hostDays", when($"isHostCancellation" === true, expr("substring(comments, 36, (review_length - 86))")).otherwise(null))
+      .withColumn("cleanedHostDays", when($"hostDays" === "th", 1).otherwise($"hostDays")) // If hostDays = "th", it should be converted to 1 day
+      .withColumn("hostCancellationDays", $"cleanedHostDays".cast(IntegerType))
+      .drop("hostDays")
+      .drop("cleanedHostDays")
+
+// Calculate average host cancellation days
+val automatedHostReviews = extendedReviews.filter($"isHostCancellation" === true)
+automatedHostReviews.groupBy().avg("hostCancellationDays").show
+// 34.96
+
+// Calculate average and median review length
+val nonAutomatedReviews = extendedReviews.filter($"isAutomatedCancellation" =!= true)
+nonAutomatedReviews.groupBy().avg("review_length").show // 234.02
+nonAutomatedReviews.stat.approxQuantile("review_length", Array(0.5), 0.25) // 128.0
+
+// Save updated data to parquets
+extendedListings.write.parquet("file_path/airbnb_data/parquets/listings.parquet")
+extendedReviews.write.parquet("file_path/airbnb_data/parquets/reviews.parquet")
