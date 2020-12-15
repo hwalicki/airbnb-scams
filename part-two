@@ -1,0 +1,68 @@
+// *** Final Project Pt. 2: Joins & Scoring ***
+
+// Load parquets
+val listings = spark.read.parquet("file_path/airbnb_data/parquets/listings.parquet")
+val reviews = spark.read.parquet("file_path/airbnb_data/parquets/reviews.parquet")
+
+// Joins to analyze if reviewers are local hosts, or host at all
+
+// Join to get the region for each review
+val specifiedColumns = reviews.columns.map(reviews(_)) ++ Array(listings("region").as("reviewRegion"))
+val regionReviews = reviews.join(listings, reviews("listing_id") === listings("id")).select(specifiedColumns:_*)
+
+// Re-join to get the region for the reviewer, if one exists
+val reviewerRegionCols = regionReviews.columns.map(regionReviews(_)) ++ Array(listings("region").as("reviewerRegion"))
+val reviewsWithRegions = regionReviews.join(listings, regionReviews("reviewer_id") === listings("host_id"), "left_outer").select(reviewerRegionCols:_*)
+
+// Are there any reviews written by hosts? No, so this data might not actually map, and isn't useful
+val reviewsByHosts = reviewsWithRegions.filter($"reviewerRegion" =!= null)
+reviewsByHosts.count // 0
+
+// Score reviews for scamminess
+// Go back to using un-joined reviews data, since host data gave us nothing
+// If the review is a cancellation by host, the score is high (scammy)
+// If the review is shorter than 1/2 the median review length, the score is medium
+import org.apache.spark.sql.functions._
+
+val scoredReviews = reviews
+      .withColumn("scoreBasedOnCancellation", when($"isHostCancellation" === true && $"hostCancellationDays" > 35, .5)
+                  .when($"isHostCancellation" === true && $"hostCancellationDays" <= 35, expr("1 - ((0.5/35) * hostCancellationDays)"))
+                  .otherwise(0))
+      .withColumn("scoreBasedOnLength", when($"review_length" > 0 && $"review_length" <= 64, expr("0.4 - ((0.4/64) * review_length)")).otherwise(0))
+      .withColumn("score", when($"scoreBasedOnCancellation".gt($"scoreBasedOnLength"), $"scoreBasedOnCancellation").otherwise($"scoreBasedOnLength"))
+      .drop("scoreBasedOnCancellation")
+      .drop("scoreBasedOnLength")
+
+// Score hosts for scamminess
+// If a host isn't verified, doesn't have a government ID verification, has fewer # of verifications,
+//   isn't a superhost, and/or doesn't have a profile pic, they score higher for scam likelihood
+val hostScoredListings = listings
+      .withColumn("identityVerifiedScore", when($"host_identity_verified" === "t", 0.3).otherwise(0))
+      .withColumn("govVerificationScore", when($"isGovVerified" === true, 0.2).otherwise(0))
+      .withColumn("numVerificationScore", expr("(0.25/13) * numVerifications"))
+      .withColumn("superhostScore", when($"host_is_superhost" === "t", 0.15).otherwise(0))
+      .withColumn("profilePicScore", when($"host_has_profile_pic" === "t", 0.1).otherwise(0))
+      .withColumn("hostScore", expr("1 - (identityVerifiedScore + govVerificationScore + numVerificationScore + superhostScore + profilePicScore)"))
+      .drop("identityVerifiedScore")
+      .drop("govVerificationScore")
+      .drop("numVerificationScore")
+      .drop("superhostScore")
+      .drop("profilePicScore")
+
+// Join with reviews and calculate listing scores
+val listingAvgReviews = hostScoredListings
+      .join(scoredReviews, hostScoredListings("id") === scoredReviews("listing_id"))
+      .groupBy($"listing_id".as("listing_id_avg"))
+      .agg(
+        avg($"score").as("avgReviewScore")
+      )
+
+val joinedListings = hostScoredListings.join(listingAvgReviews, hostScoredListings("id") === listingAvgReviews("listing_id_avg"), "left_outer")
+
+val scoredListings = joinedListings
+      .withColumn("listingScore", expr("(hostScore + avgReviewScore) / 2"))
+      .drop("listing_id_avg")
+
+// Save scored data to parquets
+scoredListings.write.parquet("file_path/airbnb_data/parquets/scoredListings.parquet")
+scoredReviews.write.parquet("file_path/airbnb_data/parquets/scoredReviews.parquet")
