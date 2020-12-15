@@ -1,0 +1,105 @@
+// *** Final Project Pt. 3: Analysis ***
+
+// Load parquets
+val listings = spark.read.parquet("file_path/airbnb_data/parquets/scoredListings.parquet")
+val reviews = spark.read.parquet("file_path/airbnb_data/parquets/scoredReviews.parquet")
+
+// What is the scammiest listing overall?
+import org.apache.spark.sql.functions._
+
+listings.agg(max($"listingScore")).show() //0.97967
+val scammiestListings = listings.filter($"listingScore" === 0.97967)
+scammiestListings.count // 1
+
+// Explore what the scammiest listing looks like
+scammiestListings.select($"id", $"region", $"name", $"host_has_profile_pic", $"number_of_reviews", $"host_since", $"host_name", $"host_location", $"host_listings_count", $"picture_url").show(1)
+
+// Let's look at the reviews for the scammiest listing
+val scammiestListingReviews = reviews.filter($"listing_id" === 10034835)
+scammiestListingReviews.count // 2
+scammiestListingReviews.show(2, false)
+
+// Who is the scammiest host overall?
+listings.agg(max($"hostScore")).show() // 0.980769
+val scammiestHosts = listings.filter($"hostScore" === 0.980769)
+scammiestHosts.count // 159
+
+// Explore scammiest hosts data
+scammiestHosts.select($"host_name", $"region", $"host_has_profile_pic", $"number_of_reviews", $"host_since", $"host_location", $"host_listings_count", $"host_verifications").show(159)
+
+// How are the scammiest hosts distributed geographically?
+val histogram = scammiestHosts.groupBy($"region").count().show()
+
+// Let's look at the hosts that have listings with at least one review, meaning there is more data in general on these listings.
+val scammiestHostsWithReviews = scammiestHosts.filter($"number_of_reviews" > 0)
+scammiestHostsWithReviews.count // 58
+
+// Explore scammiest hosts with more than 0 reviews
+scammiestHostsWithReviews.select($"host_name", $"region", $"host_has_profile_pic", $"number_of_reviews", $"host_since", $"host_location", $"host_listings_count", $"host_verifications").show(58)
+
+// How are the scammiest hosts with reviews distributed geographically?
+val histogram = scammiestHostsWithReviews.groupBy($"region").count().show()
+
+// What is the scammiest listing in each region?
+val maxListingScores = listings.groupBy($"region").agg(max($"listingScore"))
+val specifiedColumns = listings.columns.map(listings(_)) ++ Array(maxListingScores("max(ListingScore)").as("maxListingScore"))
+val scammyRegionalListings = listings.join(maxListingScores, 
+                                           listings("region") === maxListingScores("region")
+                                           && listings("listingScore") === maxListingScores("max(listingScore)"))
+                                      .select(specifiedColumns:_*)
+
+// Let's look at these
+scammyRegionalListings.count // 23
+scammyRegionalListings.select($"id", $"region", $"name", $"host_has_profile_pic", $"number_of_reviews", $"host_since", $"host_name", $"host_location", $"host_listings_count", $"picture_url").show(23)
+
+// Diving deeper into Seattle & Santiago
+scammyRegionalListings.filter($"region" isin ("Seattle", "Santiago")).select($"id", $"region", $"name", $"host_name", $"host_verifications", $"picture_url").show(7, false)
+
+// Look at the reviews for the scammiest listing in Seattle
+val scammiestListingReviewsSeattle = reviews.filter($"listing_id" === 40509822)
+scammiestListingReviewsSeattle.count // 1
+scammiestListingReviewsSeattle.show(1, false)
+
+// Look at the reviews for the Victor Hugo listing in Santiago
+val victorListingReviewsSantiago = reviews.filter($"listing_id" === 14317824)
+victorListingReviewsSantiago.count // 1
+victorListingReviewsSantiago.show(1, false)
+
+// Now, let's get some scammy listings that have a solid amount of reviews
+val scammyListingsWithReviews = listings.filter($"listingScore" >= 0.8 && $"number_of_reviews" >= 5)
+scammyListingsWithReviews.count // 2
+
+// Look into scammy listings with a handful of reviews or more
+scammyListingsWithReviews.select($"id", $"region", $"name", $"host_has_profile_pic", $"number_of_reviews", $"host_since", $"host_name", $"host_location", $"host_listings_count", $"picture_url").show(2)
+
+scammyListingsWithReviews.select($"id", $"region", $"host_verifications", $"name", $"picture_url").show(2, false)
+
+// Look at the reviews for these listings that are higher-scam and have reviews
+val laListingReviews = reviews.filter($"listing_id" === 11628861)
+laListingReviews.count // 5
+laListingReviews.show(5, false)
+
+val rdjListingReviews = reviews.filter($"listing_id" === 12814790)
+rdjListingReviews.count // 5
+rdjListingReviews.show(5, false)
+
+// What is the likelihood of a scammy listing in each region?
+val avgListingScorePerRegion = listings.groupBy($"region").agg(avg($"listingScore")).show()
+
+// Given a(ny) host, how scammy are they?
+def combinedHostScore (hostId: Int) : Double = {
+   var hostScore = listings.filter($"host_id" === hostId).select($"hostScore").first().getDouble(0)
+   var reviewAvgScore = listings.filter($"host_id" === hostId).groupBy().agg(avg($"avgReviewScore")).select($"avg(avgReviewScore)").first().getDouble(0)
+   return (hostScore + reviewAvgScore) / 2
+}
+
+val hostId = 45877399 // input host ID here
+combinedHostScore(hostId)
+
+// Given a(ny) listing, how scammy is it?
+def getListingScore (listingId: Int) : Double = {
+  return listings.filter($"id" === listingId).select($"listingScore").first().getDouble(0)
+}
+
+val listingId = 36613883 // input listing ID here
+getListingScore(listingId)
